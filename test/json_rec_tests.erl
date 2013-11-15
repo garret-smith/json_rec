@@ -58,6 +58,11 @@ deep_deep_json_data() ->
           }
      ].
 
+discriminator_test() ->
+    DeepJson = "{\"one\": 1, \"two\": {\"two\": 2, \"__type\": \"simplet2l\"}}",
+    DeepRec = json_rec:to_rec(mochijson2:decode(DeepJson), json_rec_tests, new(<<"simple">>)),
+    ?assertEqual(#simple{one=1, two=#simplet2l{two=2}}, DeepRec)
+    .
 
 simple_test() ->
     [Json, Rec] = simple_json_data(),

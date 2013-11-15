@@ -36,6 +36,7 @@
 
 -include("json_rec_types.hrl").
 
+-define(DISCRIMINATOR, <<"__type">>).
 
 %% note: I am using tuple() for record, since this is a generic record
 -spec to_json(Record :: tuple(), Module :: [atom()]) -> {struct, proplist()};
@@ -146,7 +147,7 @@ keys_rec([{Key, Value}|Rest], Module, Rec) ->
 pl(P, Module) ->
     pl(P,Module,[]).
 pl([],_M,[H]) -> H;
-pl([],_M,Acc) -> lists:reverse(Acc);
+pl([],M,Acc) -> has_discriminator(lists:reverse(Acc), M);
 pl([{Key, {struct,Pl}}|Rest], Module, Acc) ->
     Value = case module_new(Module,Key,undefined) of
                 undefined ->
@@ -207,3 +208,15 @@ module_rec_fields(Ms, Rec ) ->
 module_get(Ms, Field, Rec) ->
     M = module_has_rec(Ms, Rec),
     M:'#get-'(Field,Rec).
+
+has_discriminator(Pl, Module) ->
+    case lists:keytake(?DISCRIMINATOR, 1, Pl) of
+        false -> Pl;
+        {value, {?DISCRIMINATOR, Type}, Pl2} ->
+            case module_new(Module, Type, undefined) of
+                undefined -> Pl;
+                SubRec -> to_rec({struct, Pl2}, Module, SubRec)
+            end
+    end
+    .
+
