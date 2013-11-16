@@ -31,69 +31,72 @@
 
 -export([
          to_rec/3,
-         to_json/2
+         to_json/2,
+         to_json/3
         ]).
 
 -include("json_rec_types.hrl").
-
--define(DISCRIMINATOR, <<"__type">>).
 
 %% note: I am using tuple() for record, since this is a generic record
 -spec to_json(Record :: tuple(), Module :: [atom()]) -> {struct, proplist()};
              (Record :: tuple(), Module :: atom())  -> {struct, proplist()}.
 
-to_json(Record, Module) when is_list(Module) ->
+to_json(Record, Module, Discriminator) when is_list(Module) ->
     Fields = module_rec_fields(Module,Record),
-    Pl = rec_keys(Fields, Record, Module, []),
-    {struct, Pl};
+    Pl = rec_keys(Fields, Record, Module, Discriminator, []),
+    case is_binary(Discriminator) of
+        true -> {struct, [{Discriminator, atom_to_binary(element(1,Record))} | Pl]};
+        false -> {struct, Pl}
+    end;
 
-to_json(Record, Module) ->
-    Fields = module_rec_fields([Module],Record),
-    Pl = rec_keys(Fields,Record,[Module],[]),
-    {struct, Pl}.
+to_json(Record, Module, Discriminator) ->
+    to_json(Record, [Module], Discriminator).
 
+to_json(Record, Module) -> to_json(Record, Module, none).
 
-rec_keys([], _Record, _Module, Acc) -> Acc;
-rec_keys([Field|Rest],Record,Module,Acc) ->
+rec_keys([], _Record, _Module, _Discriminator, Acc) -> Acc;
+rec_keys([Field|Rest],Record,Module,Discriminator, Acc) ->
     Value = module_get(Module, Field, Record),
-    Key = list_to_binary(atom_to_list(Field)),
-    JsonValue = field_value(Value,Module,[]),
-    rec_keys(Rest, Record, Module,[{Key,JsonValue}|Acc]).
+    Key = atom_to_binary(Field),
+    JsonValue = field_value(Value,Module,Discriminator,[]),
+    rec_keys(Rest, Record, Module, Discriminator, [{Key,JsonValue}|Acc]).
 
-field_value(Value, Module, _Acc) when is_tuple(Value) ->
+field_value(Value, Module, Discriminator, _Acc) when is_tuple(Value) ->
     case module_has_rec(Module, Value, false) of
         false ->
             Value;
         _M when is_atom(_M) ->
-            to_json(Value,Module)
+            to_json(Value,Module,Discriminator)
     end;
-field_value(Value, _Module, _Acc) when is_atom(Value) ->
-    list_to_binary(atom_to_list(Value));
+field_value(Value, _Module, _Discriminator, _Acc) when is_atom(Value) ->
+    atom_to_binary(Value);
 
-field_value([],_Module, Acc)  -> lists:reverse(Acc);
-field_value([{_,_}|_] = Pl, Module, Acc) ->
+field_value([],_Module, _Discriminator, Acc)  -> lists:reverse(Acc);
+field_value([{_,_}|_] = Pl, Module, Discriminator, Acc) ->
     %% it is a proplist, make it a dict
     {struct, [{Key, Value} || {Key, V2} <- Pl,
                           begin
-                              Value = field_value(V2, Module, Acc),
+                              Value = field_value(V2, Module, Discriminator, Acc),
                               true
                           end]};
 
-field_value([Value|Rest], Module, Acc) ->
-    NewValue = case field_value(Value,Module,[]) of
+field_value([Value|Rest], Module, none, Acc) ->
+    NewValue = case field_value(Value,Module,none,[]) of
                    IsRec when is_tuple(IsRec),
                               is_atom(element(1,Value)) ->
                        %% this returned a record, so get the first
                        %% element from the rec tuple and do: {struct,
                        %% atom
-                       {struct, [{list_to_binary(atom_to_list(element(1,Value))),IsRec}]};
+                       {struct, [{atom_to_binary(element(1,Value)),IsRec}]};
                    %% IsTuple when is_tuple(IsTuple) ->
                    %%     tuple_to_list(IsTuple);
                    NotRec ->
                        NotRec
                end,
-    field_value(Rest, Module,[NewValue|Acc]);
-field_value(Value,_Module,_Acc) ->
+    field_value(Rest, Module,none,[NewValue|Acc]);
+field_value([Value|Rest], Module, Discriminator, Acc) ->
+    field_value(Rest, Module,Discriminator,[field_value(Value, Module, Discriminator,[])|Acc]);
+field_value(Value,_Module,_Discriminator,_Acc) ->
     Value.
 
 
@@ -115,59 +118,78 @@ field_value(Value,_Module,_Acc) ->
                     Rec :: tuple().
 
 to_rec({struct, Pl} = _Json, Module, undefined) when is_list(Module) ->
-    pl(Pl, Module);
+    pl(Pl, Module, []);
 to_rec({struct, Pl} = _Json, Module, undefined) ->
-    pl(Pl, [Module]);
+    pl(Pl, [Module], []);
 
-to_rec({struct, Pl} = _Json, Module, Rec) when is_list(Module) ->
-    keys_rec(Pl, Module, Rec);
-to_rec({struct, Pl} = _Json, Module, Rec) ->
-    keys_rec(Pl, [Module], Rec).
+to_rec({struct, Pl} = _Json, Module, Discriminators) when is_list(Module), is_list(Discriminators) ->
+    case has_discriminator(Pl, Module, Discriminators) of
+        false -> pl(Pl, Module, Discriminators);
+        {RecType, Pl2} ->
+            case module_new(Module, RecType, undefined) of
+                undefined -> pl(Pl, Module, Discriminators);
+                Rec -> keys_rec(Pl2, Module, Discriminators, Rec)
+            end
+    end;
+to_rec(Json, Module, Discriminator) when is_binary(Discriminator) ->
+    to_rec(Json, Module, [Discriminator]);
 
-keys_rec([], _Module, Rec) -> Rec;
-keys_rec([{Key, {struct, Pl}}|Rest], Module, Rec) ->
-    Field = list_to_atom(binary_to_list(Key)),
+to_rec({struct, Pl} = _Json, Module, Rec) when is_list(Module), is_tuple(Rec) ->
+    keys_rec(Pl, Module, [], Rec);
+to_rec(Json, Module, Rec) ->
+    to_rec(Json, [Module], Rec).
+
+keys_rec([], _Module, _Discriminators, Rec) -> Rec;
+keys_rec([{Key, {struct, _Pl} = Val}|Rest], Module, Discriminators, Rec) when length(Discriminators) > 0 ->
+    Field = binary_to_atom(Key),
+    Value = to_rec(Val, Module, Discriminators),
+    UpRec = module_set(Module, {Field, Value}, Rec),
+    keys_rec(Rest, Module, Discriminators, UpRec);
+keys_rec([{Key, {struct, Pl}}|Rest], Module, Discriminators, Rec) ->
+    Field = binary_to_atom(Key),
     Value = case module_new(Module, Key, undefined) of
-                undefined ->
-                    %% this is not a sub record, so just pl it
-                    pl(Pl,Module);
-                SubRec ->
-                    %% we have a new record, go back go the topproplist
-                    to_rec({struct,Pl}, Module, SubRec)
-            end,
+        undefined ->
+            %% this is not a sub record, so just pl it
+            pl(Pl,Module,Discriminators);
+        SubRec ->
+            %% we have a new record, go back go the topproplist
+            to_rec({struct,Pl}, Module, SubRec)
+    end,
     UpRec = module_set(Module, {Field,Value}, Rec),
-    keys_rec(Rest, Module, UpRec);
+    keys_rec(Rest, Module, Discriminators, UpRec);
 
-keys_rec([{Key, Value}|Rest], Module, Rec) ->
-    Field = list_to_atom(binary_to_list(Key)),
-    NewValue = to_value(Value,Module),
+keys_rec([{Key, Value}|Rest], Module, Discriminators, Rec) ->
+    Field = binary_to_atom(Key),
+    NewValue = to_value(Value,Module,Discriminators),
     NewRec = module_set(Module, {Field, NewValue}, Rec),
-    keys_rec(Rest,Module,NewRec).
+    keys_rec(Rest,Module,Discriminators,NewRec).
 
-pl(P, Module) ->
-    pl(P,Module,[]).
-pl([],_M,[H]) -> H;
-pl([],M,Acc) -> has_discriminator(lists:reverse(Acc), M);
-pl([{Key, {struct,Pl}}|Rest], Module, Acc) ->
+pl(P, Module, Discriminators) ->
+    pl(P,Module,Discriminators,[]).
+pl([],_M,_D,[H]) -> H;
+pl([],_M,_D,Acc) -> lists:reverse(Acc);
+pl([{_Key, {struct,_Pl}=Val}|Rest], Module, Discriminators, Acc) when length(Discriminators) > 0 ->
+    pl(Rest, Module, Discriminators, [to_rec(Val,Module,Discriminators)|Acc]);
+pl([{Key, {struct,Pl}}|Rest], Module, D, Acc) ->
     Value = case module_new(Module,Key,undefined) of
                 undefined ->
                     {Key, pl(Pl, Module, [])};
                 Rec ->
                     to_rec({struct, Pl}, Module, Rec)
             end,
-    pl(Rest, Module, [Value|Acc]);
-pl([{Key,Value}|Rest], Module, Acc) ->
-    pl(Rest, Module, [{Key,Value}|Acc]).
+    pl(Rest, Module, D, [Value|Acc]);
+pl([{Key,Value}|Rest], Module, D, Acc) ->
+    pl(Rest, Module, D, [{Key,Value}|Acc]).
 
-to_value(V, Module) ->
-    to_value(V, Module, []).
+to_value(V, Module, Discriminators) ->
+    to_value(V, Module, Discriminators, []).
 
-to_value({struct, Pl}, Module, _Acc) ->
-    pl(Pl,Module);
-to_value([], _Module, Acc) -> Acc;
-to_value([H|T],Module, Acc) ->
-    to_value(T,Module,[to_value(H,Module,[])|Acc]);
-to_value(V,_Module,_Acc) -> V.
+to_value({struct, Pl}, Module, Discriminators, _Acc) ->
+    to_rec({struct, Pl},Module, Discriminators);
+to_value([], _Module, _Discriminators, Acc) -> Acc;
+to_value([H|T],Module,Discriminators, Acc) ->
+    to_value(T,Module,Discriminators,[to_value(H,Module,Discriminators,[])|Acc]);
+to_value(V,_Module,_Discriminators,_Acc) -> V.
 
 
 
@@ -209,14 +231,14 @@ module_get(Ms, Field, Rec) ->
     M = module_has_rec(Ms, Rec),
     M:'#get-'(Field,Rec).
 
-has_discriminator(Pl, Module) ->
-    case lists:keytake(?DISCRIMINATOR, 1, Pl) of
-        false -> Pl;
-        {value, {?DISCRIMINATOR, Type}, Pl2} ->
-            case module_new(Module, Type, undefined) of
-                undefined -> Pl;
-                SubRec -> to_rec({struct, Pl2}, Module, SubRec)
-            end
+has_discriminator(_Pl, _Module, []) -> false;
+has_discriminator(Pl, Module, [D|Discriminators]) ->
+    case lists:keytake(D, 1, Pl) of
+        false -> has_discriminator(Pl, Module, Discriminators);
+        {value, {D, Type}, Pl2} -> {Type, Pl2}
     end
     .
+
+atom_to_binary(A) -> list_to_binary(atom_to_list(A)).
+binary_to_atom(B) -> list_to_atom(binary_to_list(B)).
 

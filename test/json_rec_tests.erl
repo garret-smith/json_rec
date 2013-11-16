@@ -58,10 +58,24 @@ deep_deep_json_data() ->
           }
      ].
 
-discriminator_test() ->
-    DeepJson = "{\"one\": 1, \"two\": {\"two\": 2, \"__type\": \"simplet2l\"}}",
-    DeepRec = json_rec:to_rec(mochijson2:decode(DeepJson), json_rec_tests, new(<<"simple">>)),
+to_rec_discriminator_test() ->
+    DeepJson = "{\"one\": 1, \"two\": {\"two\": 2, \"__type\": \"simplet2l\"}, \"$type\": \"simple\"}",
+    DeepRec = json_rec:to_rec(mochijson2:decode(DeepJson), ?MODULE, [<<"__type">>, <<"$type">>]),
     ?assertEqual(#simple{one=1, two=#simplet2l{two=2}}, DeepRec)
+    .
+
+to_json_discriminator_test() ->
+    Rec = #simple{one=1, two=#simplet2l{two=2}},
+    Json = lists:flatten(io_lib:format("~s", [mochijson2:encode(json_rec:to_json(Rec, ?MODULE, <<"__type">>))])),
+    DiscriminatorJson = "{\"__type\":\"simple\",\"two\":{\"__type\":\"simplet2l\",\"two\":2},\"one\":1}",
+    ?assertEqual(DiscriminatorJson, Json)
+    .
+
+discriminator_roundtrip_test() ->
+    [_, Record] = deep_deep_json_data(),
+    JSON = json_rec:to_json(Record, ?MODULE, <<"__type">>),
+    RoundtripRecord = json_rec:to_rec(JSON, ?MODULE, <<"__type">>),
+    ?assertEqual(Record, RoundtripRecord)
     .
 
 simple_test() ->
